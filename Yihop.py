@@ -1,5 +1,3 @@
-直接覆寫:Yihop.py|
-# ▼▼▼MAIN_CODE_START▼▼▼
 # 腳本功能：火鍋店智能營運系統 (完整還原 UI 分頁、高亮提示與分析模組，結合防掉單與動態農曆)
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
@@ -399,4 +397,3 @@ with tab_analyze:
         else: st.write("尚無歷史數據。")
     except Exception as e: 
         st.error(f"⚠️ 讀取失敗。錯誤詳情：{str(e)}")
-# ▲▲▲MAIN_CODE_END▲▲▲
