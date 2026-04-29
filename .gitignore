@@ -1,0 +1,2 @@
+# 忽略 Streamlit 的機密設定檔，防止金鑰外洩
+.streamlit/secrets.toml
