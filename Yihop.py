@@ -3,14 +3,18 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import math
 import requests
+import urllib3
 from datetime import datetime, timedelta, timezone
 import streamlit.components.v1 as components
 
+# 關閉 SSL 驗證警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # ----------------------------------------------------------------
-# 1. 基礎設定與機密參數 (資安升級版)
+# 1. 基礎設定與寫死參數
 # ----------------------------------------------------------------
 MY_CWA_API_KEY = st.secrets["CWA_API_KEY"]
-# 配合 st.connection 的預設讀取路徑來抓取網址，供側邊欄按鈕使用
+# 直接綁定老闆專屬試算表
 GOOGLE_SHEET_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
 
 st.set_page_config(page_title="火鍋店智能營運系統", layout="wide")
@@ -73,9 +77,7 @@ def get_weather_data(county_name):
     url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001"
     params = {"Authorization": MY_CWA_API_KEY, "locationName": county_name, "format": "JSON"}
     try:
-        # 已移除 verify=False，確保連線安全
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
+        resp = requests.get(url, params=params, timeout=10, verify=False)
         data = resp.json()
         loc = data['records']['location'][0]
         elements = loc['weatherElement']
