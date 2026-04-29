@@ -13,7 +13,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ----------------------------------------------------------------
 # 1. 基礎設定與寫死參數
 # ----------------------------------------------------------------
-MY_CWA_API_KEY = st.secrets["CWA_API_KEY"]
+MY_CWA_API_KEY = st.secrets["KEY"]
 # 直接綁定老闆專屬試算表
 GOOGLE_SHEET_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
 
