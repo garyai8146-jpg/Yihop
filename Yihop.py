@@ -1,5 +1,3 @@
-直接覆寫:Yihop.py|
-# ▼▼▼MAIN_CODE_START▼▼▼
 # 腳本功能：火鍋店智能營運系統 (修正：動態農曆計算、改進原子性寫入以防掉單)
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
@@ -251,4 +249,3 @@ with tab_order:
 with tab_analyze:
     st.write("📊 管理者數據分析模組（載入中...）")
     # ... (分析分頁代碼維持原狀，確保顯示正常)
-# ▲▲▲MAIN_CODE_END▲▲▲
