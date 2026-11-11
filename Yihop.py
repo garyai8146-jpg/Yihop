@@ -485,12 +485,12 @@ if role == "admin":
                 st.info("目前沒有歷史叫貨紀錄。")
             else:
                 history = history.copy()
-                history["系統建議量"] = pd.to_numeric(
-                    history.get("系統建議量", 0), errors="coerce"
-                ).fillna(0)
-                history["實際叫貨量"] = pd.to_numeric(
-                    history.get("實際叫貨量", 0), errors="coerce"
-                ).fillna(0)
+                for column in ("系統建議量", "實際叫貨量"):
+                    if column not in history.columns:
+                        history[column] = 0
+                    history[column] = pd.to_numeric(
+                        history[column], errors="coerce"
+                    ).fillna(0)
                 if "純日期" not in history.columns:
                     history["純日期"] = history["目標日期"].astype(str).str[:10]
                 if "分類" not in history.columns:
