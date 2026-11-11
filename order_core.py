@@ -88,29 +88,69 @@ def _forecast_value(element: dict, target: datetime):
     return None
 
 
-def forecast_for_arrival(payload: dict, arrival: date):
-    """Use the forecast that actually covers noon on the requested arrival day.
-
-    CWA F-C0032-001 is limited to the coming 36 hours. Do not silently apply
-    an unrelated slot to later dates, or treat API failures as known weather.
-    """
+def _forecast_at(payload: dict, target: datetime):
+    """Return weather only when *all* requested elements cover target time."""
     try:
         locations = payload["records"]["location"]
         if not locations:
             return None
         elements = {entry["elementName"]: entry for entry in locations[0]["weatherElement"]}
-        target = datetime.combine(arrival, time(12, 0), tzinfo=TAIPEI)
-        vals = {name: _forecast_value(elements[name], target) for name in ("Wx", "MinT", "MaxT", "PoP")}
+        vals = {
+            name: _forecast_value(elements[name], target)
+            for name in ("Wx", "MinT", "MaxT", "PoP")
+        }
         if any(value is None for value in vals.values()):
             return None
-        min_t = int(vals["MinT"])
-        max_t = int(vals["MaxT"])
-        pop = int(vals["PoP"])
+        min_t, max_t, pop = int(vals["MinT"]), int(vals["MaxT"]), int(vals["PoP"])
         if min_t > max_t or not 0 <= pop <= 100:
             return None
-        return {"avg_t": (min_t + max_t) / 2, "min_t": min_t, "max_t": max_t, "pop": pop, "wx": str(vals["Wx"])}
+        return {
+            "avg_t": (min_t + max_t) / 2,
+            "min_t": min_t,
+            "max_t": max_t,
+            "pop": pop,
+            "wx": str(vals["Wx"]),
+        }
     except (KeyError, TypeError, ValueError, IndexError, OverflowError):
         return None
+
+
+def forecast_for_arrival(payload: dict, arrival: date):
+    """Only apply weather factors when noon on arrival is within the forecast."""
+    target = datetime.combine(arrival, time(12, 0), tzinfo=TAIPEI)
+    return _forecast_at(payload, target)
+
+
+def forecast_for_now(payload: dict, now: datetime):
+    """Show available current/next weather even if delivery lies beyond 36h.
+
+    A forecast returned here is informational unless the delivery date also
+    matches forecast_for_arrival(). Do not use this fallback to adjust orders.
+    """
+    try:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=TAIPEI)
+        else:
+            now = now.astimezone(TAIPEI)
+        locations = payload["records"]["location"]
+        wx = next(e for e in locations[0]["weatherElement"] if e["elementName"] == "Wx")
+        periods = []
+        for slot in wx.get("time", []):
+            try:
+                begin = _parse_cwa_datetime(slot["startTime"])
+                finish = _parse_cwa_datetime(slot["endTime"])
+                if finish > now:
+                    periods.append((begin, finish))
+            except (KeyError, ValueError, TypeError):
+                continue
+        for begin, finish in sorted(periods, key=lambda pair: pair[0]):
+            target = now if begin <= now < finish else begin + (finish - begin) / 2
+            result = _forecast_at(payload, target)
+            if result:
+                return {**result, "start_time": begin.isoformat(), "end_time": finish.isoformat()}
+    except (KeyError, TypeError, ValueError, IndexError, StopIteration):
+        return None
+    return None
 
 
 def next_open_arrival(base_arrival: date, closed_weekdays: set[int]) -> date:

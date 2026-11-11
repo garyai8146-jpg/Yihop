@@ -2,7 +2,7 @@ name: Inventory and order safety checks
 
 on:
   push:
-    branches: [main, fix/order-safety-20261111]
+    branches: [main, 'fix/**']
   pull_request:
 
 permissions:
@@ -17,11 +17,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Compile all application modules
-        run: python -m py_compile Yihop.py order_core.py order_storage.py auth_core.py
+        run: python -m py_compile Yihop.py order_core.py order_storage.py auth_core.py external_services.py
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
       - name: Offline business logic and security regression tests
         run: python -m unittest discover -s tests -v
-      - name: Install runtime dependencies for a Streamlit smoke test
-        run: python -m pip install -r requirements.txt
       - name: Launch app with no secrets (must fail closed)
         run: YIHOP_CI_STREAMLIT=1 python -m unittest discover -s tests -p test_app_smoke.py -v
       - name: Ensure TLS verification stays enabled
