@@ -4,13 +4,11 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import math
 import requests
-import urllib3
 from datetime import datetime, timedelta, timezone
 import streamlit.components.v1 as components
 from lunar_python import Solar # 需安裝：pip install lunar-python gspread
 
 # 關閉 SSL 驗證警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ----------------------------------------------------------------
 # 1. 基礎設定與祕密參數
@@ -46,7 +44,7 @@ def get_weather_data(county_name):
     url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001"
     params = {"Authorization": MY_CWA_API_KEY, "locationName": county_name, "format": "JSON"}
     try:
-        resp = requests.get(url, params=params, timeout=10, verify=False)
+        resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
         loc = data['records']['location'][0]
         elements = loc['weatherElement']
