@@ -2,7 +2,7 @@ name: Inventory and order safety checks
 
 on:
   push:
-    branches: [main, fix/order-safety-20261111]
+    branches: [main, 'fix/**']
   pull_request:
 
 permissions:
