@@ -1,32 +1,37 @@
-name: Python security checks
+name: Inventory and order safety checks
+
 on:
   push:
-    branches: [main]
+    branches: [main, fix/order-safety-20261111]
   pull_request:
+
 permissions:
   contents: read
+
 jobs:
-  syntax-and-https:
+  tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Compile source
-        run: python -m py_compile Yihop.py
-      - name: Verify HTTPS validation has not been disabled
+      - name: Compile all application modules
+        run: python -m py_compile Yihop.py order_core.py order_storage.py auth_core.py
+      - name: Offline business logic and security regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Ensure TLS verification stays enabled
         run: |
           python - <<'PY'
           import ast
           from pathlib import Path
-          source = Path("Yihop.py").read_text(encoding="utf-8")
-          tree = ast.parse(source)
+          s = Path("Yihop.py").read_text(encoding="utf-8")
+          tree = ast.parse(s)
           for node in ast.walk(tree):
               if isinstance(node, ast.Call):
-                  for keyword in node.keywords:
-                      if keyword.arg == "verify" and isinstance(keyword.value, ast.Constant):
-                          assert keyword.value.value is not False, "HTTPS verification cannot be disabled"
-          assert "disable_warnings" not in source, "Do not hide TLS warnings"
-          print("TLS security checks passed.")
+                  for kw in node.keywords:
+                      if kw.arg == "verify" and isinstance(kw.value, ast.Constant):
+                          assert kw.value.value is not False
+          assert "disable_warnings" not in s
+          print("TLS security checks passed")
           PY
