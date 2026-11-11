@@ -24,6 +24,7 @@ class AccessDenied(Exception):
 class FakeWorksheet:
     def __init__(self, headers=None):
         self.headers = list(headers or [])
+        self.col_count = max(10, len(self.headers))
         self.data = []
         self.fail = None
         self.append_calls = 0
@@ -38,6 +39,9 @@ class FakeWorksheet:
 
     def col_values(self, column):
         return [self.headers[column - 1]] + [r[column - 1] for r in self.data]
+
+    def add_cols(self, extra):
+        self.col_count += extra
 
     def append_rows(self, rows, value_input_option):
         assert value_input_option == "RAW"
@@ -221,6 +225,7 @@ class GoogleSheetsTests(unittest.TestCase):
         result = sync_order(ss, "供應商A", sample_rows(), "ticket-01")
         self.assertTrue(result.fully_synced)
         self.assertEqual(ss.sheets["叫貨紀錄"].headers[:2], ["品項", "門市"])
+        self.assertGreaterEqual(ss.sheets["叫貨紀錄"].col_count, len(REQUIRED_HEADERS))
 
 
 class AppSourceSmokeTests(unittest.TestCase):
