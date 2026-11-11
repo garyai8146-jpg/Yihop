@@ -195,30 +195,35 @@ with tab_order:
         vendor_info = catalog_df[catalog_df['廠商名稱'] == selected_vendor].iloc[0]
         lead_time = 1
         if '到貨天數' in vendor_info and pd.notna(vendor_info['到貨天數']):
-            try: lead_time = int(vendor_info['到貨天數'])
-            except: pass
-            
-        arrival_dt = base_dt + timedelta(days=lead_time)
+            lead_time = int(vendor_info['到貨天數'])
+        if lead_time < 0 or lead_time > 60:
+            raise ValueError("廠商到貨天數需介於 0 到 60 天")
+
+        closed_days = set()
+        if '公休日' in vendor_info and pd.notna(vendor_info['公休日']):
+            text_days = str(vendor_info['公休日']).replace(" ", "")
+            closed_days = {
+                int(day) - 1 for day in text_days.split(",")
+                if day.isdigit() and 1 <= int(day) <= 7
+            }
+
+        nominal_arrival = (base_dt + timedelta(days=lead_time)).date()
+        corrected_arrival = next_open_arrival(nominal_arrival, closed_days)
+        if corrected_arrival != nominal_arrival:
+            st.warning(
+                f"⚠️ 原預計到貨日 {nominal_arrival:%Y/%m/%d} 遇廠商公休，"
+                f"已順延至下一個營業日 {corrected_arrival:%Y/%m/%d}；請再向廠商確認。"
+            )
+        arrival_dt = datetime.combine(corrected_arrival, datetime.min.time())
         arrival_str = arrival_dt.strftime("%Y/%m/%d")
         arrival_lunar = get_lunar_date(arrival_dt)
-        
-        days_to_cover = 1
-        if '公休日' in vendor_info and pd.notna(vendor_info['公休日']):
-            closed_str = str(vendor_info['公休日']).replace(" ", "")
-            closed_list_int = [int(d) - 1 for d in closed_str.split(",") if d.isdigit() and 1 <= int(d) <= 7]
-            
-            if arrival_dt.weekday() in closed_list_int:
-                st.error(f"⚠️ 警告：預計到貨日 (星期{DAY_MAP[arrival_dt.weekday()]}) 是 {selected_vendor} 的公休日，請確認廠商是否能送貨！")
-            
-            check_day = arrival_dt + timedelta(days=1)
-            closed_names = []
-            while check_day.weekday() in closed_list_int:
-                days_to_cover += 1
-                closed_names.append(f"星期{DAY_MAP[check_day.weekday()]}")
-                check_day += timedelta(days=1)
-                
-            if days_to_cover > 1:
-                st.info(f"💡 **公休判定**：因廠商 {', '.join(closed_names)} 公休，本次叫貨需涵蓋 **{days_to_cover} 天** 庫存。")
+        days_to_cover = days_until_next_closed_gap(corrected_arrival, closed_days)
+        if days_to_cover > 1:
+            covered_closed = [
+                f"星期{DAY_MAP[(corrected_arrival + timedelta(days=i)).weekday()]}"
+                for i in range(1, days_to_cover)
+            ]
+            st.info(f"💡 廠商接下來 {', '.join(covered_closed)} 公休，本次備貨需涵蓋 {days_to_cover} 天。")
 
         auto_has_weekend = any((arrival_dt + timedelta(days=i)).weekday() >= 4 for i in range(days_to_cover))
         auto_has_veg = any("初一" in get_lunar_date(arrival_dt + timedelta(days=i)) or "十五" in get_lunar_date(arrival_dt + timedelta(days=i)) for i in range(days_to_cover))
@@ -236,7 +241,7 @@ with tab_order:
         # --- 動態側邊欄設定 ---
         with st.sidebar.expander("🌤️ 地點與天氣預報 (可手動覆蓋)", expanded=True):
             sel_county = st.selectbox("天氣參考地點：", COUNTY_LIST, index=0)
-            weather = get_weather_data(sel_county)
+            weather = get_weather_data(sel_county, corrected_arrival.isoformat())
             
             auto_t_mult, auto_r_mult = 1.0, 1.0
             if weather:
@@ -245,7 +250,7 @@ with tab_order:
                 st.caption(f"(區間：{weather['min_t']}°C ~ {weather['max_t']}°C)")
                 auto_t_mult = 1.2 if weather['avg_t'] <= 18 else (0.8 if weather['avg_t'] > 28 else 1.0)
                 auto_r_mult = 1.5 if weather['pop'] > 70 else 1.0
-            else: st.warning("⚠️ 氣象資料同步中...")
+            else: st.warning("⚠️ 預計到貨日沒有可用的 36 小時天氣預報；氣象加成先用 x1.0，可手動調整。")
 
             st.divider()
             is_cold_override = st.checkbox("❄️ 強制啟用低溫加成 (x1.2)")
