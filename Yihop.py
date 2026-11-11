@@ -174,7 +174,8 @@ if st.sidebar.button("登出系統"):
     for key in ("_yihop_role", "_yihop_auth", "_yihop_pending_order", "_yihop_last_fingerprint", "_yihop_last_line"):
         st.session_state.pop(key, None)
     st.rerun()
-st.sidebar.link_button("📂 開啟 Google 試算表後台", GOOGLE_SHEET_URL, use_container_width=True)
+if role == "admin":
+    st.sidebar.link_button("📂 開啟 Google 試算表後台", GOOGLE_SHEET_URL, use_container_width=True)
 st.sidebar.divider()
 
 with st.sidebar.expander("📍 門市與盤點人員", expanded=True):
@@ -489,19 +490,33 @@ if role == "admin":
                 if filter_store != "全部門市": hist_df = hist_df[hist_df['門市'] == filter_store]
 
                 if not hist_df.empty:
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.subheader("🤖 系統建議 vs 🧑‍🌾 實際叫貨差異")
-                        if '純日期' not in hist_df.columns:
-                            hist_df['純日期'] = hist_df['目標日期'].astype(str).str[:10]
-                        chart_data = hist_df.groupby('純日期').agg({'系統建議量': 'sum', '實際叫貨量': 'sum'}).reset_index()
-                        st.line_chart(chart_data.set_index('純日期'))
-                        
-                    with c2:
-                        st.subheader("📦 各品項實際補貨總量")
-                        st.bar_chart(hist_df.groupby('品項')['實際叫貨量'].sum().sort_values(ascending=False).head(10))
-                    
-                    st.subheader("📋 歷史叫貨明細")
+                    if "純日期" not in hist_df.columns:
+                    hist_df["純日期"] = hist_df["目標日期"].astype(str).str[:10]
+                vendors = sorted(hist_df["廠商"].dropna().astype(str).unique().tolist())
+                selected_report_vendor = st.selectbox("分析廠商", vendors, key="_yihop_report_vendor")
+                subset = hist_df[hist_df["廠商"].astype(str) == selected_report_vendor]
+                names = sorted(subset["品項"].dropna().astype(str).unique().tolist())
+                selected_report_item = st.selectbox("分析品項", names, key="_yihop_report_item")
+                filtered = subset[subset["品項"].astype(str) == selected_report_item]
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.subheader("📈 同品項：系統建議與實際叫貨")
+                    st.caption("只比較單一廠商／品項，避免將箱、包、公斤等不同單位直接加總。")
+                    chart_data = filtered.groupby("純日期").agg({
+                        "系統建議量": "sum", "實際叫貨量": "sum"
+                    }).sort_index()
+                    st.line_chart(chart_data)
+                with c2:
+                    st.subheader("📦 叫貨紀錄次數（依品項）")
+                    st.caption("統計有叫貨的紀錄筆數，並非不同單位混加的貨量。")
+                    positive = subset[subset["實際叫貨量"] > 0]
+                    if not positive.empty:
+                        st.bar_chart(positive.groupby("品項").size().sort_values(ascending=False).head(10))
+                    else:
+                        st.info("目前沒有正數叫貨紀錄。")
+
+                st.subheader("📋 歷史叫貨明細")
                     
                     if '紀錄時間' in hist_df.columns: hist_df = hist_df.drop(columns=['紀錄時間'])
                     if '昨日報廢' in hist_df.columns: hist_df = hist_df.drop(columns=['昨日報廢'])
