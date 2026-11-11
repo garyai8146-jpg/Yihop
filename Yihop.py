@@ -102,17 +102,28 @@ def get_weather_data(county_name, arrival_iso):
         return None
 
 
-@st.cache_data(ttl="1m")
+@st.cache_data(ttl=60)
 def get_master_log():
-    """讀取時自動過濾重複項，確保讀取最後填寫數量，且防併發衝突"""
-    try: 
+    """Load a backward-compatible latest inventory snapshot per catalog item."""
+    try:
         df = conn.read(worksheet="叫貨紀錄", ttl="1m")
-        if not df.empty and '目標日期' in df.columns:
-            df['純日期'] = df['目標日期'].astype(str).str[:10]
-            sub = [c for c in ['純日期', '門市', '廠商', '品項'] if c in df.columns]
-            df = df.drop_duplicates(subset=sub, keep='last')
-        return df
-    except: return None
+        if df is None or df.empty:
+            return df
+        df = df.copy()
+        required = {"目標日期", "門市", "廠商", "品項"}
+        if not required.issubset(df.columns):
+            raise ValueError("叫貨紀錄缺少必要欄位：" + "、".join(sorted(required - set(df.columns))))
+        df["純日期"] = df["目標日期"].astype(str).str[:10]
+        if "品項鍵" in df.columns:
+            item_keys = df["品項鍵"].fillna("").astype(str).str.strip()
+            df["_item_identity"] = item_keys.where(item_keys.ne(""), df["品項"].astype(str))
+        else:
+            df["_item_identity"] = df["品項"].astype(str)
+        return df.drop_duplicates(subset=["純日期", "門市", "廠商", "_item_identity"], keep="last")
+    except Exception as exc:
+        st.error(f"無法讀取叫貨紀錄，已停止自動帶入與送單，避免使用錯誤的庫存：{exc}")
+        return None
+
 
 @st.cache_data(ttl="5m")
 def get_vendor_catalog():
