@@ -12,9 +12,10 @@ from auth_core import strong_secret, verify_pin, fingerprint, session_authorized
 from order_core import (
     catalog_item_key, widget_key, quantity_text, require_nonnegative_number,
     require_box_size, line_order_message, order_fingerprint,
-    forecast_for_arrival, next_open_arrival, days_until_next_closed_gap,
+    forecast_for_arrival, forecast_for_now, next_open_arrival, days_until_next_closed_gap,
 )
 from order_storage import sync_order
+from external_services import WeatherLookupError, request_cwa_forecast, normalize_spreadsheet_url
 
 # ----------------------------------------------------------------
 # 1. 基礎設定與祕密參數
@@ -70,6 +71,7 @@ try:
 except Exception:
     st.error("缺少 Google Sheets 連線設定：[connections.gsheets].spreadsheet")
     st.stop()
+SHEET_NAV_URL = normalize_spreadsheet_url(GOOGLE_SHEET_URL)
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 NON_FOOD_CATEGORIES = ['外帶塑膠提袋', '氣體與耗材', '耗材', '廚房清潔用品', '清潔用品', '外帶包材', '雜貨']
@@ -92,19 +94,10 @@ def get_lunar_date(target_date):
     except:
         return ""
 
-@st.cache_data(ttl=3600)
-def get_weather_data(county_name, arrival_iso):
-    """Only apply a 36-hour forecast to an actually covered arrival day."""
-    if not MY_CWA_API_KEY:
-        return None
-    url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001"
-    params = {"Authorization": MY_CWA_API_KEY, "locationName": county_name, "format": "JSON"}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        return forecast_for_arrival(resp.json(), date.fromisoformat(arrival_iso))
-    except (requests.RequestException, ValueError, KeyError, TypeError):
-        return None
+@st.cache_data(ttl=900, show_spinner=False)
+def get_weather_payload(county_name, api_key):
+    """Cache only successful CWA fetches, never API errors or missing forecasts."""
+    return request_cwa_forecast(county_name, api_key)
 
 
 @st.cache_data(ttl=60)
@@ -180,7 +173,21 @@ if st.sidebar.button("登出系統"):
         st.session_state.pop(key, None)
     st.rerun()
 if role == "admin":
-    st.sidebar.link_button("📂 開啟 Google 試算表後台", GOOGLE_SHEET_URL, use_container_width=True)
+    if SHEET_NAV_URL:
+        st.sidebar.link_button(
+            "📂 開啟 Google 試算表後台", SHEET_NAV_URL,
+            use_container_width=True,
+        )
+        st.sidebar.markdown(f"[🔗 按鈕沒反應？點此直接開啟試算表]({SHEET_NAV_URL})")
+        with st.sidebar.expander("🛠️ 試算表連結無法開啟？"):
+            st.caption("如瀏覽器阻擋新分頁，可以複製下方網址貼到網址列。")
+            st.code(SHEET_NAV_URL, language=None)
+            st.caption("如果 Google 提示需要權限，請確認目前登入的 Google 帳號已獲得試算表分享權限。")
+    else:
+        st.sidebar.error(
+            "試算表設定不是有效的 Google Sheets 網址／ID。"
+            "請檢查 Secrets 的 [connections.gsheets].spreadsheet。"
+        )
 st.sidebar.divider()
 
 with st.sidebar.expander("📍 門市與盤點人員", expanded=True):
@@ -258,16 +265,51 @@ with tab_order:
         # --- 動態側邊欄設定 ---
         with st.sidebar.expander("🌤️ 地點與天氣預報 (可手動覆蓋)", expanded=True):
             sel_county = st.selectbox("天氣參考地點：", COUNTY_LIST, index=0)
-            weather = get_weather_data(sel_county, corrected_arrival.isoformat())
-            
+            weather, current_weather, weather_error = None, None, None
+            try:
+                forecast_payload = get_weather_payload(sel_county, MY_CWA_API_KEY)
+                current_weather = forecast_for_now(forecast_payload, datetime.now(tz_tw))
+                weather = forecast_for_arrival(forecast_payload, corrected_arrival)
+            except WeatherLookupError as exc:
+                weather_error = str(exc)
+            except Exception:
+                weather_error = "天氣資料處理失敗，請重新整理；若持續發生請檢查氣象資料格式。"
+
             auto_t_mult, auto_r_mult = 1.0, 1.0
+            if weather_error:
+                st.error(f"⚠️ 氣象查詢失敗：{weather_error}")
+            elif current_weather:
+                period_start = datetime.fromisoformat(current_weather["start_time"])
+                period_end = datetime.fromisoformat(current_weather["end_time"])
+                st.markdown(f"🌤️ **近期預報：{current_weather['wx']}**")
+                st.write(
+                    f"🌡️ {current_weather['min_t']}～{current_weather['max_t']}°C"
+                    f"｜降雨機率 {current_weather['pop']}%"
+                )
+                st.caption(
+                    f"預報時段：{period_start:%m/%d %H:%M}～{period_end:%m/%d %H:%M}"
+                    "（這是目前可用預報，不一定是到貨當天）"
+                )
+            else:
+                st.warning("目前沒有可顯示的近期預報時段，稍後再更新。")
+
             if weather:
-                st.write(f"🌥️ 預報：**{weather['wx']}**")
-                st.write(f"🌡️ 營業均溫：**{weather['avg_t']:.1f}°C**")
-                st.caption(f"(區間：{weather['min_t']}°C ~ {weather['max_t']}°C)")
-                auto_t_mult = 1.2 if weather['avg_t'] <= 18 else (0.8 if weather['avg_t'] > 28 else 1.0)
-                auto_r_mult = 1.5 if weather['pop'] > 70 else 1.0
-            else: st.warning("⚠️ 預計到貨日沒有可用的 36 小時天氣預報；氣象加成先用 x1.0，可手動調整。")
+                st.info(
+                    f"✅ 到貨日 {corrected_arrival:%m/%d} 的備貨參考："
+                    f"{weather['wx']}，{weather['min_t']}～{weather['max_t']}°C，"
+                    f"降雨機率 {weather['pop']}%"
+                )
+                auto_t_mult = 1.2 if weather["avg_t"] <= 18 else (0.8 if weather["avg_t"] > 28 else 1.0)
+                auto_r_mult = 1.5 if weather["pop"] > 70 else 1.0
+            elif not weather_error:
+                st.info(
+                    f"預計到貨日 {corrected_arrival:%m/%d} 不在可用的 36 小時預報時段；"
+                    "近期天氣僅供參考，不會拿其他日期的天氣套用自動加成。"
+                )
+
+            if st.button("🔄 重新取得氣象資料", key="_yihop_weather_refresh"):
+                get_weather_payload.clear()
+                st.rerun()
 
             st.divider()
             is_cold_override = st.checkbox("❄️ 強制啟用低溫加成 (x1.2)")
