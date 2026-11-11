@@ -1,40 +1,40 @@
-# 🍲 火鍋店智能營運系統 (Hotpot Smart Operations System)
+# Yihop｜火鍋店備貨與叫貨工作台
 
-## 🎯 專案背景
-本專案為針對實體火鍋店量身打造的 Serverless 營運自動化工具。透過 Streamlit 結合 Google Sheets 作為輕量級資料庫，取代傳統紙本盤點與人工叫貨流程。系統導入了氣象 API 與農曆演算法，能根據「氣候變化」與「特殊節日」自動計算安全庫存，並已具備防禦多門市高併發寫入的資料庫架構。
----
+> 將門市盤點、叫貨、廠商供貨日與氣象／農曆因素整合於 Streamlit 介面的流程工具。
 
-## 🛠️ 技術核心與架構亮點
+[GitHub 面試作品導覽](https://github.com/garyai8146-jpg/Yihop_LineBOT/blob/main/PORTFOLIO.md)
 
-### 1. 具備事件溯源概念的原子性寫入 (Append-Only & Read-Time Deduplication)
-* **解決併發衝突 (Race Condition)**：捨棄傳統的整表覆寫模式，底層改採 `gspread` 的 `append_rows` 進行原子性追加寫入，徹底根絕多門市於交接班尖峰同時送出所導致的「掉單」與「覆蓋」事故。
-* **無損資料修改**：讀取階段 (`get_master_log`) 實作動態去重邏輯 (`drop_duplicates(keep='last')`)。這不僅保留了完整的稽核軌跡 (Audit Trail)，更確保門市人員能隨時重開網頁修正盤點失誤。
+## 解決的問題
 
-### 2. 動態環境參數加成引擎 (Dynamic Multiplier Engine)
-* **氣象連動 (CWA API)**：介接中央氣象署 API，動態抓取門市當地氣溫與降雨機率。系統依此自動觸發「低溫加成 (x1.2)」或「降雨加成 (x1.5)」，精準預測氣候對餐飲業的備料影響。
-* **永久農曆推算 (Lunar Algorithm)**：導入 `lunar_python` 演算法引擎，精準推算農曆初一、十五。徹底汰除硬編碼 (Hardcoded) 的時間節點，實現永久免維護的「素食大日 (x1.5)」自動加成警示。
+門市每日叫貨需要參考庫存、廠商公休日、未來備貨天數、天氣變化與農曆節日。手工計算容易漏項，表格也難以協調多店同時操作。此專案將規則集中在單一工作台，提供建議量、視覺警示與可複製的 LINE 叫貨文字。
 
-### 3. Mobile-First 現場作業體驗 (Mobile UX/UI)
-* **防呆警示機制**：系統自動偵測廠商公休日並推算需「涵蓋天數」；對於特殊節日（如素食日）與超重/爆倉風險，皆具備搶眼的視覺化 Alert 高亮提示。
-* **零斷層通訊對接**：盤點完成後，系統自動統整缺貨品項，並提供「一鍵複製 LINE 叫貨訊息」功能，無縫對接現有的供應商溝通渠道。
+## 核心流程與技術取捨
 
----
+- **資料存取：** 使用 `streamlit-gsheets`／`gspread` 連接 Google Sheets。
+- **追加式紀錄：** 部分叫貨寫入使用 `append_rows`，讀取時按日期、門市、廠商與品項保留最近一筆，以降低整表覆寫衝突。**這不是資料庫交易或完整併發正確性的保證**；其他回寫與失敗重試仍需另外驗證。
+- **動態備料參數：** 使用中央氣象署公開資料與 `lunar_python` 推算低溫、雨天及農曆特定日期的備貨加成。規則是營運輔助，並非經歷史訂單驗證的需求預測模型。
+- **現場操作：** 將異常量、特殊節日、供貨間隔與叫貨草稿放入 Streamlit 介面。
 
-## ⚙️ 技術棧 (Tech Stack)
-* **Frontend / Framework**: Streamlit (Python)
-* **Database**: Google Sheets API (`streamlit-gsheets`, `gspread`)
-* **External APIs**: 交通部中央氣象署 (CWA) 開放資料 API
-* **Algorithms**: `lunar_python` (農曆與節氣推算)
-* **Security**: Streamlit Secrets Management (`.streamlit/secrets.toml`)
+## 技術棧
 
----
+Python · Streamlit · pandas · Google Sheets API · gspread · CWA Open Data API · lunar_python
 
-## 🚀 部署與資安規範
+## 本機執行
 
-本專案採嚴格的配置與代碼分離原則。執行前請確保於專案根目錄建立 `.streamlit/secrets.toml`，並設定以下環境變數：
+```powershell
+python -m pip install -r requirements.txt
+streamlit run Yihop.py
+```
 
-```toml
-KEY = "CWA-YOUR-API-KEY"
+執行前須於**本機不受 Git 追蹤**的 `.streamlit/secrets.toml` 或部署平台的私密設定中，提供 CWA API 金鑰 `KEY` 與 Google Sheets 連線設定 `[connections.gsheets]`。不要把服務帳戶私鑰、實際試算表 URL 或 Token 寫入 Git。
 
-[connections.gsheets]
-spreadsheet = "[https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit](https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit)"
+## 已知限制與正式部署前檢查
+
+- **TLS 憑證驗證：** 目前 `Yihop.py` 的一處氣象 API 請求使用 `verify=False`，此設定不符合正式環境的安全要求，應修正並驗證 HTTPS 憑證鏈。
+- Google Sheets 的追加寫入與讀取去重不能取代資料庫層唯一約束、版本控制與交易隔離。
+- 缺乏可公開重現的多店競態壓力測試及完整自動化驗收；正式上線需另行檢查權限、資料保護及故障復原。
+- 本專案展示**規則型備貨決策與流程整合**，不宣稱已達成任何精準預測或零掉單保證。
+
+## 面試展示
+
+可以聚焦在「為何採用 Sheets／Streamlit 快速建立原型」、「如何處理同品項的多次修正」、「外部氣象／節日因子的設計」，以及「何時需要將資料層升級為具交易能力的資料庫」。
