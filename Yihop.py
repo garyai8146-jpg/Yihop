@@ -471,96 +471,93 @@ with tab_order:
     except Exception as e: st.error(f"系統錯誤: {e}")
 
 # ==========================================
-# 分頁 2: 儀表板淨化與彩虹高亮版 (完整還原)
+# 管理者的營運數據分析（門市人員完全不執行這段）
 # ==========================================
 if role == "admin":
     with tab_analyze:
-        st.header("📊 營運數據分析 (管理端)")
-        st.info("💡 建議點擊側邊欄的『開啟 Google 試算表後台』以獲取最完整的報表數據。")
+        st.header("📊 營運數據分析")
+        st.caption("如需完整原始紀錄，可開啟側邊欄的 Google 試算表。")
         try:
-            hist_df = get_master_log()
-            if hist_df is not None and not hist_df.empty:
-                if '系統建議量' not in hist_df.columns: hist_df['系統建議量'] = 0
-                if '實際叫貨量' not in hist_df.columns: hist_df['實際叫貨量'] = 0
-                
-                hist_df['系統建議量'] = pd.to_numeric(hist_df['系統建議量'], errors='coerce').fillna(0)
-                hist_df['實際叫貨量'] = pd.to_numeric(hist_df['實際叫貨量'], errors='coerce').fillna(0)
-                
-                filter_store = st.radio("篩選檢視門市：", ["全部門市"] + STORE_LIST, horizontal=True)
-                if filter_store != "全部門市": hist_df = hist_df[hist_df['門市'] == filter_store]
+            history = get_master_log()
+            if history is None:
+                st.error("歷史資料目前不可讀取。")
+            elif history.empty:
+                st.info("目前沒有歷史叫貨紀錄。")
+            else:
+                history = history.copy()
+                history["系統建議量"] = pd.to_numeric(
+                    history.get("系統建議量", 0), errors="coerce"
+                ).fillna(0)
+                history["實際叫貨量"] = pd.to_numeric(
+                    history.get("實際叫貨量", 0), errors="coerce"
+                ).fillna(0)
+                if "純日期" not in history.columns:
+                    history["純日期"] = history["目標日期"].astype(str).str[:10]
+                if "分類" not in history.columns:
+                    history["分類"] = "舊版未分類"
+                else:
+                    history["分類"] = history["分類"].fillna("舊版未分類").replace("", "舊版未分類")
 
-                if not hist_df.empty:
-                    if "純日期" not in hist_df.columns:
-                    hist_df["純日期"] = hist_df["目標日期"].astype(str).str[:10]
-                vendors = sorted(hist_df["廠商"].dropna().astype(str).unique().tolist())
-                selected_report_vendor = st.selectbox("分析廠商", vendors, key="_yihop_report_vendor")
-                subset = hist_df[hist_df["廠商"].astype(str) == selected_report_vendor]
-                names = sorted(subset["品項"].dropna().astype(str).unique().tolist())
-                selected_report_item = st.selectbox("分析品項", names, key="_yihop_report_item")
-                filtered = subset[subset["品項"].astype(str) == selected_report_item]
+                selected_store = st.radio(
+                    "查看門市", ["全部門市"] + STORE_LIST, horizontal=True, key="_yihop_report_store"
+                )
+                if selected_store != "全部門市":
+                    history = history[history["門市"] == selected_store]
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.subheader("📈 同品項：系統建議與實際叫貨")
-                    st.caption("只比較單一廠商／品項，避免將箱、包、公斤等不同單位直接加總。")
-                    chart_data = filtered.groupby("純日期").agg({
-                        "系統建議量": "sum", "實際叫貨量": "sum"
-                    }).sort_index()
-                    st.line_chart(chart_data)
-                with c2:
-                    st.subheader("📦 叫貨紀錄次數（依品項）")
-                    st.caption("統計有叫貨的紀錄筆數，並非不同單位混加的貨量。")
-                    positive = subset[subset["實際叫貨量"] > 0]
-                    if not positive.empty:
-                        st.bar_chart(positive.groupby("品項").size().sort_values(ascending=False).head(10))
-                    else:
-                        st.info("目前沒有正數叫貨紀錄。")
+                if history.empty:
+                    st.info("這間門市目前沒有紀錄。")
+                else:
+                    vendors = sorted(history["廠商"].dropna().astype(str).unique().tolist())
+                    chosen_vendor = st.selectbox("選擇廠商", vendors, key="_yihop_report_vendor")
+                    vendor_history = history[history["廠商"].astype(str) == chosen_vendor]
+                    choices = sorted({
+                        (str(record["分類"]), str(record["品項"]))
+                        for record in vendor_history.to_dict("records")
+                    })
+                    if choices:
+                        chosen = st.selectbox(
+                            "比較品項", choices,
+                            format_func=lambda value: f"{value[0]} / {value[1]}",
+                            key="_yihop_report_item",
+                        )
+                        selected = vendor_history[
+                            (vendor_history["分類"].astype(str) == chosen[0])
+                            & (vendor_history["品項"].astype(str) == chosen[1])
+                        ]
+                        left, right = st.columns(2)
+                        with left:
+                            st.subheader("📈 同品項：建議與實際叫貨")
+                            st.caption("不同品項的箱、包、公斤等單位不能直接加總。")
+                            chart = selected.groupby("純日期")[["系統建議量", "實際叫貨量"]].sum().sort_index()
+                            st.line_chart(chart)
+                        with right:
+                            st.subheader("📦 叫貨出現次數")
+                            st.caption("這裡是有叫貨的紀錄數，不是混合單位的總貨量。")
+                            positive = vendor_history[vendor_history["實際叫貨量"] > 0]
+                            if positive.empty:
+                                st.info("尚無正數叫貨紀錄。")
+                            else:
+                                st.bar_chart(positive.groupby("品項").size().sort_values(ascending=False).head(10))
 
-                st.subheader("📋 歷史叫貨明細")
-                    
-                    if '紀錄時間' in hist_df.columns: hist_df = hist_df.drop(columns=['紀錄時間'])
-                    if '昨日報廢' in hist_df.columns: hist_df = hist_df.drop(columns=['昨日報廢'])
-                    if '純日期' in hist_df.columns: hist_df = hist_df.drop(columns=['純日期'])
-                    
-                    hist_df = hist_df.iloc[::-1]
-                    
-                    def format_target_date(date_str):
+                    st.subheader("📋 歷史叫貨明細")
+                    visible = history.drop(
+                        columns=["_item_identity", "純日期", "昨日報廢"],
+                        errors="ignore",
+                    )
+
+                    def highlight_date(value):
                         try:
-                            raw_str = str(date_str)
-                            clean_date = raw_str[:10] 
-                            dt = datetime.strptime(clean_date, "%Y/%m/%d")
-                            is_wknd = dt.weekday() >= 4 
-                            
-                            weekday_str = DAY_MAP[dt.weekday()]
-                            lunar_str = get_lunar_date(dt)
-                            is_veg = lunar_str and ("初一" in lunar_str or "十五" in lunar_str)
-                            
-                            prefix = ""
-                            if is_veg: prefix += "🔥"
-                            if is_wknd: prefix += "🌟"
-                            if prefix: prefix += " "
-                            
-                            lunar_disp_fmt = f" ({lunar_str})" if lunar_str else ""
-                            
-                            return f"{prefix}{clean_date} (星期{weekday_str}){lunar_disp_fmt}"
-                        except: return date_str
+                            raw = str(value)
+                            dt = datetime.strptime(raw[:10], "%Y/%m/%d")
+                            weekend = dt.weekday() >= 4
+                            lunar = get_lunar_date(dt)
+                            vegetarian = "初一" in lunar or "十五" in lunar
+                            prefix = ("🔥" if vegetarian else "") + ("🌟" if weekend else "")
+                            return f"{prefix} {raw}" if prefix else raw
+                        except (ValueError, TypeError):
+                            return value
 
-                    hist_df['目標日期'] = hist_df['目標日期'].apply(format_target_date)
-                    
-                    def highlight_special_days(row):
-                        date_val = str(row['目標日期'])
-                        if '🔥' in date_val and '🌟' in date_val:
-                            return ['background-color: rgba(255, 165, 0, 0.3); color: #d97700; font-weight: bold'] * len(row)
-                        elif '🔥' in date_val:
-                            return ['background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; font-weight: bold'] * len(row)
-                        elif '🌟' in date_val:
-                            return ['background-color: rgba(0, 150, 255, 0.15); color: #0066cc; font-weight: bold'] * len(row)
-                        return [''] * len(row)
-
-                    styled_df = hist_df.style.apply(highlight_special_days, axis=1)
-                    st.dataframe(styled_df, use_container_width=True)
-                    
-                else: st.write("該門市尚無數據。")
-            else: st.write("尚無歷史數據。")
-        except Exception as e: 
-            st.error(f"⚠️ 讀取失敗。錯誤詳情：{str(e)}")
+                    visible["目標日期"] = visible["目標日期"].apply(highlight_date)
+                    st.dataframe(visible.iloc[::-1], use_container_width=True)
+        except Exception as exc:
+            st.error(f"管理分析無法讀取：{exc}")
