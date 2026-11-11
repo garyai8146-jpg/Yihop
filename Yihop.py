@@ -45,7 +45,10 @@ expected_pin = ADMIN_PIN if saved_role == "admin" else STAFF_PIN
 if saved_role not in ("staff", "admin") or not session_authorized(saved_auth, expected_pin):
     st.title("🔐 門市營運系統登入")
     role_choice = st.radio("登入身分", ["門市人員", "管理者"], horizontal=True)
-    with st.form("yihop_login"):
+    if st.session_state.get("_yihop_login_failures", 0) >= 5:
+        st.error("本次登入階段驗證失敗次數過多，請關閉工作階段後再試。")
+        st.stop()
+    with st.form("yihop_login", clear_on_submit=True):
         entered_pin = st.text_input("登入 PIN", type="password")
         login = st.form_submit_button("登入", type="primary")
     if login:
@@ -53,8 +56,10 @@ if saved_role not in ("staff", "admin") or not session_authorized(saved_auth, ex
         if verify_pin(entered_pin, chosen):
             st.session_state["_yihop_role"] = "admin" if role_choice == "管理者" else "staff"
             st.session_state["_yihop_auth"] = fingerprint(chosen)
+            st.session_state["_yihop_login_failures"] = 0
             st.rerun()
         else:
+            st.session_state["_yihop_login_failures"] = st.session_state.get("_yihop_login_failures", 0) + 1
             st.error("驗證失敗，請確認身分與 PIN。")
     st.stop()
 
@@ -171,7 +176,7 @@ taiwan_now = datetime.now(tz_tw)
 st.sidebar.title("🛠️ 門市營運工具")
 st.sidebar.caption("登入身分：" + ("管理者" if role == "admin" else "門市人員"))
 if st.sidebar.button("登出系統"):
-    for key in ("_yihop_role", "_yihop_auth", "_yihop_pending_order", "_yihop_last_fingerprint", "_yihop_last_line"):
+    for key in ("_yihop_role", "_yihop_auth", "_yihop_login_failures", "_yihop_pending_order", "_yihop_last_fingerprint", "_yihop_last_line"):
         st.session_state.pop(key, None)
     st.rerun()
 if role == "admin":
