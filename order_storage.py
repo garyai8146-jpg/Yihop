@@ -49,6 +49,11 @@ def ensure_headers(worksheet) -> list[str]:
         raise OrderSyncError("試算表第一列有重複欄名，請先整理欄名再送單")
     updated = headers + [name for name in REQUIRED_HEADERS if name not in headers]
     if updated != headers:
+        # Older worksheets may have fewer physical grid columns than the
+        # augmented header. Extend the grid before writing the header.
+        column_count = getattr(worksheet, "col_count", None)
+        if isinstance(column_count, int) and column_count < len(updated):
+            worksheet.add_cols(len(updated) - column_count)
         worksheet.update(range_name="A1", values=[updated])
     return updated
 
