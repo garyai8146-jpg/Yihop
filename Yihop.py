@@ -277,108 +277,181 @@ with tab_order:
             veg_m = st.number_input("初一十五(素食)加成倍率", value=1.5, step=0.1)
             is_veg_ui = st.checkbox("啟用初一十五(素食)加成", value=auto_has_veg)
 
-        # --- 讀取功能：自動抓取今日已填寫之剩餘量 ---
+        # 新舊紀錄相容：新資料用「品項鍵」，舊資料退回以品項名稱尋找。
         hist_today = get_master_log()
+        if hist_today is None:
+            st.stop()
         history_counts = {}
         in_transit_boxes = {}
-        
-        if lead_time > 1:
-            in_transit_dates = [(base_dt + timedelta(days=d)).strftime("%Y/%m/%d") for d in range(1, lead_time)]
-            if hist_today is not None and not hist_today.empty:
-                match_transit = hist_today[(hist_today['門市'] == sel_store) & (hist_today['廠商'] == selected_vendor) & (hist_today['純日期'].isin(in_transit_dates))]
-                if not match_transit.empty:
-                    match_transit['實際叫貨量'] = pd.to_numeric(match_transit['實際叫貨量'], errors='coerce')
-                    in_transit_boxes = match_transit.groupby('品項')['實際叫貨量'].sum().to_dict()
-                    st.info("📦 系統已自動偵測並扣除『在途庫存』，防止爆倉。")
+        if not hist_today.empty:
+            today_rows = hist_today[
+                (hist_today["純日期"] == arrival_str)
+                & (hist_today["廠商"] == selected_vendor)
+                & (hist_today["門市"] == sel_store)
+            ]
+            for record in today_rows.to_dict("records"):
+                identity = str(record.get("_item_identity", record["品項"]))
+                history_counts[identity] = record.get("剩餘量", 0)
 
-        if hist_today is not None and not hist_today.empty:
-            match_today = hist_today[(hist_today['純日期'] == arrival_str) & (hist_today['廠商'] == selected_vendor) & (hist_today['門市'] == sel_store)]
-            if not match_today.empty:
-                history_counts = dict(zip(match_today['品項'], match_today['剩餘量']))
+            # 在途的日期以實際到貨日為準（包含因公休日順延的天數）。
+            travel_days = max(0, (corrected_arrival - base_dt.date()).days)
+            if travel_days > 1:
+                transit_dates = {
+                    (base_dt + timedelta(days=i)).strftime("%Y/%m/%d")
+                    for i in range(1, travel_days)
+                }
+                transit_rows = hist_today[
+                    (hist_today["門市"] == sel_store)
+                    & (hist_today["廠商"] == selected_vendor)
+                    & (hist_today["純日期"].isin(transit_dates))
+                ].copy()
+                if not transit_rows.empty:
+                    transit_rows["實際叫貨量"] = pd.to_numeric(
+                        transit_rows["實際叫貨量"], errors="coerce"
+                    ).fillna(0)
+                    in_transit_boxes = transit_rows.groupby("_item_identity")["實際叫貨量"].sum().to_dict()
+                    st.info("📦 已扣除這段期間預計到貨的在途庫存；請與實際配送狀態核對。")
 
-        # --- 渲染盤點項目：恢復手機端友善的分頁 (st.tabs) ---
         df = conn.read(worksheet=selected_vendor, ttl="5m")
-        unique_categories = list(df['分類'].unique())
-        
-        if unique_categories:
-            vendor_tabs = st.tabs(unique_categories)
-            for i, cat in enumerate(unique_categories):
-                with vendor_tabs[i]:
-                    cat_items = df[df['分類'] == cat]
-                    for _, row in cat_items.iterrows():
-                        target = calculate_target_precise(
-                            row['基礎安全庫存'], cat, row.get('係數標籤', '一般'), days_to_cover, arrival_dt,
-                            is_wknd_ui, auto_has_weekend, is_veg_ui, auto_has_veg, weekend_m, veg_m, t_mult, r_mult
+        required_columns = {"分類", "品項", "基礎安全庫存", "一箱數量", "叫貨單位", "盤點單位"}
+        if df is None or df.empty or not required_columns.issubset(df.columns):
+            raise ValueError(
+                "廠商品項清單為空或缺少必要欄位：" +
+                "、".join(sorted(required_columns - set(df.columns if df is not None else [])))
+            )
+        df = df.reset_index(drop=True)
+        categories = df["分類"].fillna("未分類").astype(str).unique().tolist()
+        visible_items = []
+
+        category_tabs = st.tabs(categories)
+        for category_index, cat in enumerate(categories):
+            with category_tabs[category_index]:
+                for position, row in df[df["分類"].fillna("未分類").astype(str) == cat].iterrows():
+                    name = str(row["品項"]).strip()
+                    if not name:
+                        raise ValueError("廠商品項清單中有未填名稱的品項")
+                    item_key = catalog_item_key(selected_vendor, cat, name, int(position))
+                    box_size = require_box_size(row["一箱數量"])
+                    base_amount = require_nonnegative_number(row["基礎安全庫存"], f"{name} 基礎安全庫存")
+                    target = calculate_target_precise(
+                        base_amount, cat, row.get("係數標籤", "一般"), days_to_cover, arrival_dt,
+                        is_wknd_ui, auto_has_weekend, is_veg_ui, auto_has_veg,
+                        weekend_m, veg_m, t_mult, r_mult,
+                    )
+
+                    previous = history_counts.get(item_key, history_counts.get(name, 0.0))
+                    transit = in_transit_boxes.get(item_key, in_transit_boxes.get(name, 0.0))
+                    try:
+                        default_stock = require_nonnegative_number(previous, f"{name} 歷史庫存")
+                        transit_boxes = require_nonnegative_number(transit, f"{name} 在途數量")
+                    except ValueError:
+                        st.warning(f"⚠️ {name} 的歷史數值不正確，請重新盤點。")
+                        default_stock, transit_boxes = 0.0, 0.0
+
+                    st.write(f"**{name}**")
+                    suffix = f" | 🚚在途: {quantity_text(transit_boxes)}{row['叫貨單位']}" if transit_boxes else ""
+                    st.caption(f"單位: {row['盤點單位']}{suffix}")
+                    left, right = st.columns(2)
+                    with left:
+                        counted_stock = st.number_input(
+                            "庫存", key=widget_key(sel_store, selected_vendor, corrected_arrival, item_key, "inventory"),
+                            min_value=0.0, step=1.0, value=float(default_stock), format="%.1f",
                         )
-                        default_val = float(history_counts.get(row['品項'], 0.0))
-                        in_transit_box_qty = float(in_transit_boxes.get(row['品項'], 0.0))
-                        in_transit_pieces = in_transit_box_qty * row['一箱數量']
-                        
-                        st.write(f"**{row['品項']}**")
-                        transit_text = f" | 🚚在途: {int(in_transit_box_qty)}{row['叫貨單位']}" if in_transit_box_qty > 0 else ""
-                        st.caption(f"單位: {row['盤點單位']}{transit_text}")
-                        
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            cur_val = st.number_input("庫存", key=f"inv_{row['品項']}", min_value=0.0, step=1.0, value=default_val, format="%.1f")
-                        with c2:
-                            sys_suggest = math.ceil((target - cur_val - in_transit_pieces) / row['一箱數量'])
-                            if sys_suggest < 0: sys_suggest = 0
-                            
-                            final_order = st.number_input(f"叫貨({row['叫貨單位']})", key=f"final_{row['品項']}", value=float(sys_suggest), step=1.0, format="%.1f")
-                            
-                            st.session_state[f"rec_{row['品項']}"] = {
-                                "sys": sys_suggest, "final": final_order, "target": target, "cur": cur_val
-                            }
+                    suggested_boxes = max(0, math.ceil((target - counted_stock - transit_boxes * box_size) / box_size))
+                    with right:
+                        final_boxes = st.number_input(
+                            f"叫貨({row['叫貨單位']})",
+                            key=widget_key(sel_store, selected_vendor, corrected_arrival, item_key, "order"),
+                            min_value=0.0, value=float(suggested_boxes), step=0.5, format="%.1f",
+                        )
+                    visible_items.append({
+                        "目標日期": db_target_date,
+                        "門市": sel_store,
+                        "盤點人員": staff_name.strip(),
+                        "廠商": selected_vendor,
+                        "分類": cat,
+                        "品項": name,
+                        "品項鍵": item_key,
+                        "叫貨單位": str(row["叫貨單位"]),
+                        "剩餘量": counted_stock,
+                        "系統建議量": suggested_boxes,
+                        "實際叫貨量": final_boxes,
+                        "涵蓋天數": days_to_cover,
+                        "均溫": weather["avg_t"] if weather else "",
+                    })
 
         st.divider()
 
-        # --- 原子性附加寫入 ---
-        if st.button("🚀 確認送出叫貨單", type="primary", use_container_width=True):
-            if not staff_name: st.error("⚠️ 請填寫左側的『人員姓名』！")
+        def finalize_submission(pending):
+            """Retain the same ID and frozen rows until both worksheets confirm."""
+            try:
+                spreadsheet = conn.client.open_by_url(GOOGLE_SHEET_URL)
+                result = sync_order(spreadsheet, pending["vendor"], pending["rows"], pending["id"])
+            except Exception as exc:
+                st.session_state["_yihop_pending_order"] = pending
+                st.error(f"無法連線 Google Sheets，已保留送單編號，請重試：{exc}")
+                return
+            if result.fully_synced:
+                st.session_state.pop("_yihop_pending_order", None)
+                st.session_state["_yihop_last_fingerprint"] = pending["fingerprint"]
+                st.session_state["_yihop_last_line"] = pending["line"]
+                get_master_log.clear()
+                st.success(f"✅ 兩份紀錄均已核對完成。送單編號：{pending['id']}")
+                st.caption(result.message)
             else:
-                order_rows = []
-                order_text = ""
-                
-                for _, row in df.iterrows():
-                    d = st.session_state.get(f"rec_{row['品項']}")
-                    if d and d['final'] >= 0:
-                        if d['final'] > 0:
-                            order_text += f"{row['品項']} {int(d['final'])}{row['叫貨單位']}、"
-                        order_rows.append({
-                            "目標日期": db_target_date,
-                            "門市": sel_store, 
-                            "盤點人員": staff_name, "廠商": selected_vendor, "品項": row['品項'], 
-                            "剩餘量": d['cur'], "系統建議量": d['sys'], "實際叫貨量": d['final'],
-                            "涵蓋天數": days_to_cover,
-                            "均溫": weather['avg_t'] if weather else 25
-                        })
-                
-                if order_rows:
-                    client = conn.client
-                    ss = client.open_by_url(GOOGLE_SHEET_URL)
-                    for sheet_name in ["叫貨紀錄", f"紀錄_{selected_vendor}"]:
-                        try:
-                            ws = ss.worksheet(sheet_name)
-                            headers = ws.row_values(1)
-                            if not headers:
-                                df_new = pd.DataFrame(order_rows)
-                                conn.update(worksheet=sheet_name, data=df_new)
-                                continue
-                            new_data = [[str(r.get(h, "")) for h in headers] for r in order_rows]
-                            ws.append_rows(new_data)
-                        except Exception as e:
-                            if "WorksheetNotFound" in str(type(e)):
-                                df_new = pd.DataFrame(order_rows)
-                                conn.update(worksheet=sheet_name, data=df_new)
-                    
-                    st.success("✅ 盤點資料已安全同步！下次開啟將自動帶入最後填寫的數量。")
-                    get_master_log.clear()
-                    final_msg = f"{selected_vendor}您好，我是{sel_store}的{staff_name}，今日訂單：{order_text.rstrip('、')}，謝謝。"
-                    st.text_area("📋 LINE 訊息確認：", value=final_msg, height=100)
-                    copy_to_clipboard(final_msg)
+                st.session_state["_yihop_pending_order"] = pending
+                st.error(f"⚠️ {result.status}：{result.message}")
+                st.code(pending["id"], language=None)
+
+        pending = st.session_state.get("_yihop_pending_order")
+        if pending:
+            st.warning(
+                f"上一筆送單 {pending['id']} 尚未全部同步。"
+                "請先補送；系統會用相同編號核對，避免把已成功的部分重複寫入。"
+            )
+            if st.button("🔄 補送上一筆未完成的叫貨單", type="primary"):
+                finalize_submission(pending)
+
+        if st.button(
+            "🚀 確認送出叫貨單", type="primary",
+            use_container_width=True, disabled=bool(pending),
+        ):
+            if not staff_name.strip():
+                st.error("⚠️ 請填寫人員姓名／工號")
+            elif not visible_items:
+                st.error("⚠️ 目前沒有可儲存的盤點品項")
+            else:
+                rows = [{name: value for name, value in item.items()} for item in visible_items]
+                check = order_fingerprint(rows, sel_store, selected_vendor, staff_name.strip(), arrival_str)
+                if check == st.session_state.get("_yihop_last_fingerprint"):
+                    st.info("此工作階段已成功提交相同內容；為防止重複送單，已略過本次操作。")
                 else:
-                    st.success("🎉 目前庫存(含在途)已充足，無需叫貨！")
+                    submission_id = uuid.uuid4().hex
+                    submitted_at = datetime.now(tz_tw).isoformat(timespec="seconds")
+                    for row in rows:
+                        row["送單編號"] = submission_id
+                        row["送單時間"] = submitted_at
+                    payload = {
+                        "id": submission_id,
+                        "vendor": selected_vendor,
+                        "rows": rows,
+                        "fingerprint": check,
+                        "line": line_order_message(selected_vendor, sel_store, staff_name.strip(), rows),
+                    }
+                    st.session_state["_yihop_pending_order"] = payload
+                    finalize_submission(payload)
+
+        if st.session_state.get("_yihop_last_line"):
+            st.markdown("### 📋 LINE 叫貨訊息")
+            st.text_area(
+                "核對後複製到 LINE", value=st.session_state["_yihop_last_line"],
+                height=100, key="_yihop_line_preview",
+            )
+            copy_to_clipboard(st.session_state["_yihop_last_line"])
+            if st.button("➕ 我確定要再建立一筆新叫貨單"):
+                st.session_state.pop("_yihop_last_fingerprint", None)
+                st.session_state.pop("_yihop_last_line", None)
+                st.rerun()
 
     except Exception as e: st.error(f"系統錯誤: {e}")
 
