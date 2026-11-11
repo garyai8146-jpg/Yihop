@@ -13,7 +13,7 @@ class StreamlitSmokeTests(unittest.TestCase):
         at = AppTest.from_file(str(app_path), default_timeout=30)
         at.run()
         self.assertFalse(at.exception, [str(item.message) for item in at.exception])
-        errors = [item.message for item in at.error]
+        errors = [str(item.proto) for item in at.error]
         self.assertTrue(
             any("尚未完成安全設定" in text for text in errors),
             f"Expected fail-closed login config message, got: {errors}",
