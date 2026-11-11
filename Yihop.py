@@ -106,7 +106,7 @@ def get_weather_data(county_name, arrival_iso):
 def get_master_log():
     """Load a backward-compatible latest inventory snapshot per catalog item."""
     try:
-        df = conn.read(worksheet="叫貨紀錄", ttl="1m")
+        df = conn.read(worksheet="叫貨紀錄", ttl=0)
         if df is None or df.empty:
             return df
         df = df.copy()
@@ -322,6 +322,13 @@ with tab_order:
         df = df.reset_index(drop=True)
         categories = df["分類"].fillna("未分類").astype(str).unique().tolist()
         visible_items = []
+        duplicate_counts = {}
+        for _, catalog_row in df.iterrows():
+            grouping = (str(catalog_row["分類"]), str(catalog_row["品項"]))
+            duplicate_counts[grouping] = duplicate_counts.get(grouping, 0) + 1
+        if any(count > 1 for count in duplicate_counts.values()):
+            st.error("商品目錄中有相同分類且同名的品項。請在表格內區分名稱，避免庫存互相混用。")
+            st.stop()
 
         category_tabs = st.tabs(categories)
         for category_index, cat in enumerate(categories):
@@ -330,7 +337,8 @@ with tab_order:
                     name = str(row["品項"]).strip()
                     if not name:
                         raise ValueError("廠商品項清單中有未填名稱的品項")
-                    item_key = catalog_item_key(selected_vendor, cat, name, int(position))
+                    # Unique category/name pair remains stable if catalog rows are reordered.
+                    item_key = catalog_item_key(selected_vendor, cat, name, 0)
                     box_size = require_box_size(row["一箱數量"])
                     base_amount = require_nonnegative_number(row["基礎安全庫存"], f"{name} 基礎安全庫存")
                     target = calculate_target_precise(
@@ -385,7 +393,13 @@ with tab_order:
         def finalize_submission(pending):
             """Retain the same ID and frozen rows until both worksheets confirm."""
             try:
-                spreadsheet = conn.client.open_by_url(GOOGLE_SHEET_URL)
+                # st-gsheets-connection wraps the underlying gspread client.
+                # Calling conn.client.open_by_url() directly is invalid on its wrapper.
+                gsheets_client = conn.client
+                if hasattr(gsheets_client, "_open_spreadsheet"):
+                    spreadsheet = gsheets_client._open_spreadsheet(spreadsheet=GOOGLE_SHEET_URL)
+                else:
+                    spreadsheet = gsheets_client.open_by_url(GOOGLE_SHEET_URL)
                 result = sync_order(spreadsheet, pending["vendor"], pending["rows"], pending["id"])
             except Exception as exc:
                 st.session_state["_yihop_pending_order"] = pending
