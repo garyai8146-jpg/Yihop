@@ -3,20 +3,68 @@ import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import math
+import os
+import uuid
 import requests
-from datetime import datetime, timedelta, timezone
-import streamlit.components.v1 as components
-from lunar_python import Solar # 需安裝：pip install lunar-python gspread
-
-# 關閉 SSL 驗證警告
+from datetime import date, datetime, timedelta, timezone
+from lunar_python import Solar
+from auth_core import strong_secret, verify_pin, fingerprint, session_authorized
+from order_core import (
+    catalog_item_key, widget_key, quantity_text, require_nonnegative_number,
+    require_box_size, line_order_message, order_fingerprint,
+    forecast_for_arrival, next_open_arrival, days_until_next_closed_gap,
+)
+from order_storage import sync_order
 
 # ----------------------------------------------------------------
 # 1. 基礎設定與祕密參數
 # ----------------------------------------------------------------
-MY_CWA_API_KEY = st.secrets["KEY"]
-GOOGLE_SHEET_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
-
 st.set_page_config(page_title="火鍋店智能營運系統", layout="wide")
+
+
+def secret(name):
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(name, ""))
+    except Exception:
+        return ""
+
+
+STAFF_PIN = secret("YIHOP_STAFF_PIN")
+ADMIN_PIN = secret("YIHOP_ADMIN_PIN")
+if not strong_secret(STAFF_PIN) or not strong_secret(ADMIN_PIN) or STAFF_PIN == ADMIN_PIN:
+    st.error("尚未完成安全設定：請在 Streamlit Secrets 設定兩組不同、至少 12 字元的 YIHOP_STAFF_PIN 和 YIHOP_ADMIN_PIN。")
+    st.info("為保護門市訂貨與管理資料，未設定密碼前無法使用本系統。")
+    st.stop()
+
+saved_role = st.session_state.get("_yihop_role")
+saved_auth = st.session_state.get("_yihop_auth")
+expected_pin = ADMIN_PIN if saved_role == "admin" else STAFF_PIN
+if saved_role not in ("staff", "admin") or not session_authorized(saved_auth, expected_pin):
+    st.title("🔐 門市營運系統登入")
+    role_choice = st.radio("登入身分", ["門市人員", "管理者"], horizontal=True)
+    with st.form("yihop_login"):
+        entered_pin = st.text_input("登入 PIN", type="password")
+        login = st.form_submit_button("登入", type="primary")
+    if login:
+        chosen = ADMIN_PIN if role_choice == "管理者" else STAFF_PIN
+        if verify_pin(entered_pin, chosen):
+            st.session_state["_yihop_role"] = "admin" if role_choice == "管理者" else "staff"
+            st.session_state["_yihop_auth"] = fingerprint(chosen)
+            st.rerun()
+        else:
+            st.error("驗證失敗，請確認身分與 PIN。")
+    st.stop()
+
+role = saved_role
+MY_CWA_API_KEY = secret("KEY")
+try:
+    GOOGLE_SHEET_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
+except Exception:
+    st.error("缺少 Google Sheets 連線設定：[connections.gsheets].spreadsheet")
+    st.stop()
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 NON_FOOD_CATEGORIES = ['外帶塑膠提袋', '氣體與耗材', '耗材', '廚房清潔用品', '清潔用品', '外帶包材', '雜貨']
@@ -39,19 +87,20 @@ def get_lunar_date(target_date):
     except:
         return ""
 
-@st.cache_data(ttl="1h")
-def get_weather_data(county_name):
+@st.cache_data(ttl=3600)
+def get_weather_data(county_name, arrival_iso):
+    """Only apply a 36-hour forecast to an actually covered arrival day."""
+    if not MY_CWA_API_KEY:
+        return None
     url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001"
     params = {"Authorization": MY_CWA_API_KEY, "locationName": county_name, "format": "JSON"}
     try:
         resp = requests.get(url, params=params, timeout=10)
-        data = resp.json()
-        loc = data['records']['location'][0]
-        elements = loc['weatherElement']
-        idx = 2 
-        min_t, max_t = int(elements[2]['time'][idx]['parameter']['parameterName']), int(elements[4]['time'][idx]['parameter']['parameterName'])
-        return {"avg_t": (min_t + max_t) / 2, "min_t": min_t, "max_t": max_t, "pop": int(elements[1]['time'][idx]['parameter']['parameterName']), "wx": elements[0]['time'][idx]['parameter']['parameterName']}
-    except: return None
+        resp.raise_for_status()
+        return forecast_for_arrival(resp.json(), date.fromisoformat(arrival_iso))
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        return None
+
 
 @st.cache_data(ttl="1m")
 def get_master_log():
@@ -70,18 +119,10 @@ def get_vendor_catalog():
     return conn.read(worksheet="系統目錄", ttl="5m")
 
 def copy_to_clipboard(text):
-    html_code = f"""
-    <script>
-    function copyText() {{
-        const text = `{text}`;
-        navigator.clipboard.writeText(text).then(() => {{
-            alert('訊息已複製！請貼上至 LINE。');
-        }});
-    }}
-    </script>
-    <button onclick="copyText()" style="background-color: #25D366; color: white; padding: 10px; border: none; border-radius: 5px; cursor: pointer; width: 100%; font-weight: bold;">📋 複製 LINE 叫貨訊息</button>
-    """
-    components.html(html_code, height=50)
+    """Streamlit's built-in copy button avoids injecting order text as JS."""
+    st.code(text, language=None)
+    st.caption("可使用上方程式碼區塊的複製按鈕，再貼到 LINE。")
+
 
 # ----------------------------------------------------------------
 # 3. 逐日精算大腦
@@ -117,6 +158,11 @@ tz_tw = timezone(timedelta(hours=8))
 taiwan_now = datetime.now(tz_tw)
 
 st.sidebar.title("🛠️ 門市營運工具")
+st.sidebar.caption("登入身分：" + ("管理者" if role == "admin" else "門市人員"))
+if st.sidebar.button("登出系統"):
+    for key in ("_yihop_role", "_yihop_auth", "_yihop_pending_order", "_yihop_last_fingerprint", "_yihop_last_line"):
+        st.session_state.pop(key, None)
+    st.rerun()
 st.sidebar.link_button("📂 開啟 Google 試算表後台", GOOGLE_SHEET_URL, use_container_width=True)
 st.sidebar.divider()
 
@@ -134,7 +180,11 @@ with st.sidebar.expander("📍 門市與盤點人員", expanded=True):
 # 5. 主畫面流程
 # ----------------------------------------------------------------
 
-tab_order, tab_analyze = st.tabs(["📝 現場盤點作業", "📊 管理者數據分析"])
+if role == "admin":
+    tab_order, tab_analyze = st.tabs(["📝 現場盤點作業", "📊 管理者數據分析"])
+else:
+    tab_order = st.container()
+    tab_analyze = None
 
 with tab_order:
     try:
@@ -319,79 +369,80 @@ with tab_order:
 # ==========================================
 # 分頁 2: 儀表板淨化與彩虹高亮版 (完整還原)
 # ==========================================
-with tab_analyze:
-    st.header("📊 營運數據分析 (管理端)")
-    st.info("💡 建議點擊側邊欄的『開啟 Google 試算表後台』以獲取最完整的報表數據。")
-    try:
-        hist_df = get_master_log()
-        if hist_df is not None and not hist_df.empty:
-            if '系統建議量' not in hist_df.columns: hist_df['系統建議量'] = 0
-            if '實際叫貨量' not in hist_df.columns: hist_df['實際叫貨量'] = 0
-            
-            hist_df['系統建議量'] = pd.to_numeric(hist_df['系統建議量'], errors='coerce').fillna(0)
-            hist_df['實際叫貨量'] = pd.to_numeric(hist_df['實際叫貨量'], errors='coerce').fillna(0)
-            
-            filter_store = st.radio("篩選檢視門市：", ["全部門市"] + STORE_LIST, horizontal=True)
-            if filter_store != "全部門市": hist_df = hist_df[hist_df['門市'] == filter_store]
+if role == "admin":
+    with tab_analyze:
+        st.header("📊 營運數據分析 (管理端)")
+        st.info("💡 建議點擊側邊欄的『開啟 Google 試算表後台』以獲取最完整的報表數據。")
+        try:
+            hist_df = get_master_log()
+            if hist_df is not None and not hist_df.empty:
+                if '系統建議量' not in hist_df.columns: hist_df['系統建議量'] = 0
+                if '實際叫貨量' not in hist_df.columns: hist_df['實際叫貨量'] = 0
+                
+                hist_df['系統建議量'] = pd.to_numeric(hist_df['系統建議量'], errors='coerce').fillna(0)
+                hist_df['實際叫貨量'] = pd.to_numeric(hist_df['實際叫貨量'], errors='coerce').fillna(0)
+                
+                filter_store = st.radio("篩選檢視門市：", ["全部門市"] + STORE_LIST, horizontal=True)
+                if filter_store != "全部門市": hist_df = hist_df[hist_df['門市'] == filter_store]
 
-            if not hist_df.empty:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.subheader("🤖 系統建議 vs 🧑‍🌾 實際叫貨差異")
-                    if '純日期' not in hist_df.columns:
-                        hist_df['純日期'] = hist_df['目標日期'].astype(str).str[:10]
-                    chart_data = hist_df.groupby('純日期').agg({'系統建議量': 'sum', '實際叫貨量': 'sum'}).reset_index()
-                    st.line_chart(chart_data.set_index('純日期'))
+                if not hist_df.empty:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.subheader("🤖 系統建議 vs 🧑‍🌾 實際叫貨差異")
+                        if '純日期' not in hist_df.columns:
+                            hist_df['純日期'] = hist_df['目標日期'].astype(str).str[:10]
+                        chart_data = hist_df.groupby('純日期').agg({'系統建議量': 'sum', '實際叫貨量': 'sum'}).reset_index()
+                        st.line_chart(chart_data.set_index('純日期'))
+                        
+                    with c2:
+                        st.subheader("📦 各品項實際補貨總量")
+                        st.bar_chart(hist_df.groupby('品項')['實際叫貨量'].sum().sort_values(ascending=False).head(10))
                     
-                with c2:
-                    st.subheader("📦 各品項實際補貨總量")
-                    st.bar_chart(hist_df.groupby('品項')['實際叫貨量'].sum().sort_values(ascending=False).head(10))
-                
-                st.subheader("📋 歷史叫貨明細")
-                
-                if '紀錄時間' in hist_df.columns: hist_df = hist_df.drop(columns=['紀錄時間'])
-                if '昨日報廢' in hist_df.columns: hist_df = hist_df.drop(columns=['昨日報廢'])
-                if '純日期' in hist_df.columns: hist_df = hist_df.drop(columns=['純日期'])
-                
-                hist_df = hist_df.iloc[::-1]
-                
-                def format_target_date(date_str):
-                    try:
-                        raw_str = str(date_str)
-                        clean_date = raw_str[:10] 
-                        dt = datetime.strptime(clean_date, "%Y/%m/%d")
-                        is_wknd = dt.weekday() >= 4 
-                        
-                        weekday_str = DAY_MAP[dt.weekday()]
-                        lunar_str = get_lunar_date(dt)
-                        is_veg = lunar_str and ("初一" in lunar_str or "十五" in lunar_str)
-                        
-                        prefix = ""
-                        if is_veg: prefix += "🔥"
-                        if is_wknd: prefix += "🌟"
-                        if prefix: prefix += " "
-                        
-                        lunar_disp_fmt = f" ({lunar_str})" if lunar_str else ""
-                        
-                        return f"{prefix}{clean_date} (星期{weekday_str}){lunar_disp_fmt}"
-                    except: return date_str
+                    st.subheader("📋 歷史叫貨明細")
+                    
+                    if '紀錄時間' in hist_df.columns: hist_df = hist_df.drop(columns=['紀錄時間'])
+                    if '昨日報廢' in hist_df.columns: hist_df = hist_df.drop(columns=['昨日報廢'])
+                    if '純日期' in hist_df.columns: hist_df = hist_df.drop(columns=['純日期'])
+                    
+                    hist_df = hist_df.iloc[::-1]
+                    
+                    def format_target_date(date_str):
+                        try:
+                            raw_str = str(date_str)
+                            clean_date = raw_str[:10] 
+                            dt = datetime.strptime(clean_date, "%Y/%m/%d")
+                            is_wknd = dt.weekday() >= 4 
+                            
+                            weekday_str = DAY_MAP[dt.weekday()]
+                            lunar_str = get_lunar_date(dt)
+                            is_veg = lunar_str and ("初一" in lunar_str or "十五" in lunar_str)
+                            
+                            prefix = ""
+                            if is_veg: prefix += "🔥"
+                            if is_wknd: prefix += "🌟"
+                            if prefix: prefix += " "
+                            
+                            lunar_disp_fmt = f" ({lunar_str})" if lunar_str else ""
+                            
+                            return f"{prefix}{clean_date} (星期{weekday_str}){lunar_disp_fmt}"
+                        except: return date_str
 
-                hist_df['目標日期'] = hist_df['目標日期'].apply(format_target_date)
-                
-                def highlight_special_days(row):
-                    date_val = str(row['目標日期'])
-                    if '🔥' in date_val and '🌟' in date_val:
-                        return ['background-color: rgba(255, 165, 0, 0.3); color: #d97700; font-weight: bold'] * len(row)
-                    elif '🔥' in date_val:
-                        return ['background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; font-weight: bold'] * len(row)
-                    elif '🌟' in date_val:
-                        return ['background-color: rgba(0, 150, 255, 0.15); color: #0066cc; font-weight: bold'] * len(row)
-                    return [''] * len(row)
+                    hist_df['目標日期'] = hist_df['目標日期'].apply(format_target_date)
+                    
+                    def highlight_special_days(row):
+                        date_val = str(row['目標日期'])
+                        if '🔥' in date_val and '🌟' in date_val:
+                            return ['background-color: rgba(255, 165, 0, 0.3); color: #d97700; font-weight: bold'] * len(row)
+                        elif '🔥' in date_val:
+                            return ['background-color: rgba(255, 75, 75, 0.2); color: #ff4b4b; font-weight: bold'] * len(row)
+                        elif '🌟' in date_val:
+                            return ['background-color: rgba(0, 150, 255, 0.15); color: #0066cc; font-weight: bold'] * len(row)
+                        return [''] * len(row)
 
-                styled_df = hist_df.style.apply(highlight_special_days, axis=1)
-                st.dataframe(styled_df, use_container_width=True)
-                
-            else: st.write("該門市尚無數據。")
-        else: st.write("尚無歷史數據。")
-    except Exception as e: 
-        st.error(f"⚠️ 讀取失敗。錯誤詳情：{str(e)}")
+                    styled_df = hist_df.style.apply(highlight_special_days, axis=1)
+                    st.dataframe(styled_df, use_container_width=True)
+                    
+                else: st.write("該門市尚無數據。")
+            else: st.write("尚無歷史數據。")
+        except Exception as e: 
+            st.error(f"⚠️ 讀取失敗。錯誤詳情：{str(e)}")
